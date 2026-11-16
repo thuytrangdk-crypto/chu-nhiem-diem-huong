@@ -20,7 +20,14 @@ import {
   TaskItem,
   ClassSettings,
 } from '../types';
-import { formatDateVN, getFullVietnameseDate } from '../utils/storage';
+import { getFullVietnameseDate } from '../utils/storage';
+import {
+  computeStudentSemesterConduct,
+  filterConductByTerm,
+  getAcademicYearsConfig,
+  getActiveTerm,
+  normalizeAcademicYear,
+} from '../utils/conductHelpers';
 
 interface ReportsViewProps {
   settings: ClassSettings;
@@ -37,12 +44,32 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   conduct,
   tasks,
 }) => {
-  const [period, setPeriod] = useState<'week' | 'month' | 'semester'>('week');
+  const [period, setPeriod] = useState<'week' | 'month' | 'hk1' | 'hk2' | 'year'>('hk1');
+
+  const yearConfigs = getAcademicYearsConfig(settings);
+  const activeTerm = getActiveTerm(settings);
+  const activeAcademicYear = normalizeAcademicYear(
+    settings.academicYear || activeTerm.academicYear
+  );
+  const yearCfg = yearConfigs.find(
+    (c) => normalizeAcademicYear(c.academicYear) === activeAcademicYear
+  );
 
   // Lọc dữ liệu theo kỳ
   const now = new Date();
-  const filterByDate = (dateStr: string) => {
-    if (period === 'semester') return true;
+  const filterAttendanceByPeriod = (dateStr: string) => {
+    if (period === 'year') {
+      if (!yearCfg) return true;
+      return dateStr >= yearCfg.hk1Start && dateStr <= yearCfg.hk2End;
+    }
+    if (period === 'hk1') {
+      if (!yearCfg) return true;
+      return dateStr >= yearCfg.hk1Start && dateStr <= yearCfg.hk1End;
+    }
+    if (period === 'hk2') {
+      if (!yearCfg) return true;
+      return dateStr >= yearCfg.hk2Start && dateStr <= yearCfg.hk2End;
+    }
     const d = new Date(dateStr);
     const diffDays = (now.getTime() - d.getTime()) / (1000 * 3600 * 24);
     if (period === 'week') return diffDays <= 7 && diffDays >= -1;
@@ -50,8 +77,15 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
     return true;
   };
 
-  const periodAttendance = attendance.filter((a) => filterByDate(a.date));
-  const periodConduct = conduct.filter((c) => filterByDate(c.date));
+  const periodAttendance = attendance.filter((a) => filterAttendanceByPeriod(a.date));
+  const periodConduct =
+    period === 'hk1'
+      ? filterConductByTerm(conduct, activeAcademicYear, 'HK1', yearConfigs)
+      : period === 'hk2'
+      ? filterConductByTerm(conduct, activeAcademicYear, 'HK2', yearConfigs)
+      : period === 'year'
+      ? filterConductByTerm(conduct, activeAcademicYear, 'ALL', yearConfigs)
+      : conduct.filter((c) => filterAttendanceByPeriod(c.date));
 
   // Thống kê chuyên cần
   const totalAttendanceLogs = periodAttendance.length;
@@ -81,11 +115,22 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
   const totalTasks = tasks.length;
   const taskCompletionRate = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 100;
 
-  // Top 3 học sinh xuất sắc
+  // Top 3 học sinh xuất sắc (với HK1/HK2 tính theo chuẩn 200đ độc lập)
   const studentScores = students.map((s) => {
+    if (period === 'hk1' || period === 'hk2') {
+      const semRes = computeStudentSemesterConduct(
+        s.id,
+        conduct,
+        activeAcademicYear,
+        period === 'hk1' ? 'HK1' : 'HK2',
+        yearConfigs,
+        settings.ratingThresholds
+      );
+      return { student: s, score: semRes.totalScore, isSemesterScore: true };
+    }
     const sRecords = periodConduct.filter((c) => c.studentId === s.id);
     const score = sRecords.reduce((sum, r) => sum + r.points, 0);
-    return { student: s, score };
+    return { student: s, score, isSemesterScore: false };
   });
   const topStudents = [...studentScores].sort((a, b) => b.score - a.score).slice(0, 3);
 
@@ -109,32 +154,25 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center space-x-2.5">
-          <div className="flex items-center space-x-1 p-1 bg-slate-100 rounded-xl text-xs font-bold">
-            <button
-              onClick={() => setPeriod('week')}
-              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                period === 'week' ? 'bg-white text-blue-600 shadow-xs' : 'text-slate-600'
-              }`}
-            >
-              Tuần
-            </button>
-            <button
-              onClick={() => setPeriod('month')}
-              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                period === 'month' ? 'bg-white text-blue-600 shadow-xs' : 'text-slate-600'
-              }`}
-            >
-              Tháng
-            </button>
-            <button
-              onClick={() => setPeriod('semester')}
-              className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
-                period === 'semester' ? 'bg-white text-blue-600 shadow-xs' : 'text-slate-600'
-              }`}
-            >
-              Học kỳ I
-            </button>
+        <div className="flex flex-wrap items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-1 p-1 bg-slate-100 rounded-xl text-xs font-bold">
+            {([
+              { id: 'week', label: 'Tuần' },
+              { id: 'month', label: 'Tháng' },
+              { id: 'hk1', label: 'Học kỳ I' },
+              { id: 'hk2', label: 'Học kỳ II' },
+              { id: 'year', label: 'Cả năm' },
+            ] as const).map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setPeriod(tab.id)}
+                className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                  period === tab.id ? 'bg-white text-blue-600 shadow-xs' : 'text-slate-600'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
           </div>
 
           <button
@@ -163,10 +201,19 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
           </div>
 
           <h2 className="text-lg sm:text-xl font-extrabold text-slate-900 mt-4 tracking-tight uppercase">
-            BÁO CÁO CÔNG TÁC CHỦ NHIỆM {period === 'week' ? 'TUẦN' : period === 'month' ? 'THÁNG' : 'HỌC KỲ I'}
+            BÁO CÁO CÔNG TÁC CHỦ NHIỆM{' '}
+            {period === 'week'
+              ? 'TUẦN'
+              : period === 'month'
+              ? 'THÁNG'
+              : period === 'hk1'
+              ? 'HỌC KỲ I'
+              : period === 'hk2'
+              ? 'HỌC KỲ II'
+              : 'CẢ NĂM HỌC'}
           </h2>
           <p className="text-xs text-slate-600 mt-1">
-            Giáo viên chủ nhiệm: <span className="font-bold">{settings.teacherName}</span> • Năm học: {settings.academicYear}
+            Giáo viên chủ nhiệm: <span className="font-bold">{settings.teacherName}</span> • Năm học: {activeAcademicYear}
           </p>
           <p className="text-[11px] text-slate-400 mt-0.5">Ngày lập: {getFullVietnameseDate()}</p>
         </div>
@@ -323,8 +370,10 @@ export const ReportsView: React.FC<ReportsViewProps> = ({
                       </div>
                     </div>
                   </div>
-                  <span className="font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-md">
-                    +{item.score} điểm
+                  <span className="font-bold text-emerald-700 bg-emerald-50 px-2.5 py-1 rounded-md font-mono">
+                    {item.isSemesterScore
+                      ? `${item.score}/200đ`
+                      : `${item.score > 0 ? '+' : ''}${item.score} điểm`}
                   </span>
                 </div>
               ))}

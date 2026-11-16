@@ -21,6 +21,11 @@ import {
   INITIAL_QUICK_NOTES,
   getTodayDateString,
 } from '../data/sampleData';
+import {
+  getAcademicYearsConfig,
+  normalizeAcademicYear,
+  resolveRecordTerm,
+} from './conductHelpers';
 
 export { getTodayDateString };
 
@@ -88,6 +93,10 @@ export function sanitizeAppState(state: AppState): AppState {
     updatedSettings.className = 'Lớp 9A5';
   }
 
+  // 3b. Cấu hình năm học & học kỳ (luôn giữ lại cấu hình người dùng nếu đã thiết lập)
+  updatedSettings.academicYear = normalizeAcademicYear(updatedSettings.academicYear);
+  updatedSettings.academicYearsConfig = getAcademicYearsConfig(updatedSettings);
+
   // 4. Danh sách lớp
   let classes = Array.isArray(state.classes) && state.classes.length > 0 ? state.classes : DEFAULT_CLASSES;
   classes = classes.map((c) => {
@@ -97,10 +106,30 @@ export function sanitizeAppState(state: AppState): AppState {
     return c;
   });
 
+  // 5. Bảo toàn & gắn khóa năm học / học kỳ cho lịch sử thi đua cũ (không trùng ID, không xóa dữ liệu)
+  const rawConduct = Array.isArray(state.conduct) ? state.conduct : [];
+  const seenIds = new Set<string>();
+  const normalizedConduct: ConductRecord[] = [];
+  for (const rec of rawConduct) {
+    if (!rec || !rec.id || seenIds.has(rec.id)) continue;
+    seenIds.add(rec.id);
+    const term = resolveRecordTerm(
+      rec,
+      updatedSettings.academicYearsConfig,
+      updatedSettings.academicYear
+    );
+    normalizedConduct.push({
+      ...rec,
+      academicYear: term.academicYear,
+      semester: term.semester,
+    });
+  }
+
   return {
     ...state,
     settings: updatedSettings,
     classes,
+    conduct: normalizedConduct,
   };
 }
 
@@ -228,10 +257,10 @@ export function importBackupJSON(file: File): Promise<AppState> {
         if (!parsed.students || !parsed.settings) {
           throw new Error('Định dạng tệp sao lưu không hợp lệ!');
         }
-        const fullState: AppState = {
+        const rawFullState: AppState = {
           settings: parsed.settings || DEFAULT_SETTINGS,
           classes: parsed.classes || DEFAULT_CLASSES,
-          activeClassId: parsed.activeClassId || 'class-8a1',
+          activeClassId: parsed.activeClassId || 'class-9a5',
           students: parsed.students || INITIAL_STUDENTS,
           criteria: parsed.criteria || DEFAULT_CRITERIA,
           attendance: parsed.attendance || [],
@@ -240,6 +269,7 @@ export function importBackupJSON(file: File): Promise<AppState> {
           tasks: parsed.tasks || [],
           quickNotes: parsed.quickNotes || [],
         };
+        const fullState = sanitizeAppState(rawFullState);
         saveAppState(fullState);
         resolve(fullState);
       } catch (err) {

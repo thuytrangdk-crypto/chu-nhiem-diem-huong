@@ -37,6 +37,11 @@ import {
   resetToSampleData,
   sanitizeAppState,
 } from './utils/storage';
+import {
+  detectTermByDate,
+  getAcademicYearsConfig,
+  normalizeAcademicYear,
+} from './utils/conductHelpers';
 
 export default function App() {
   // Load initial state from LocalStorage or Default Sample Data
@@ -375,14 +380,50 @@ export default function App() {
   };
 
   const handleAddConductRecord = (recordData: Omit<ConductRecord, 'id'>) => {
-    const newRecord: ConductRecord = {
-      ...recordData,
-      id: `cd-${Date.now()}`,
-    };
-    setAppState((prev) => ({
-      ...prev,
-      conduct: [newRecord, ...prev.conduct],
-    }));
+    setAppState((prev) => {
+      const configs = getAcademicYearsConfig(prev.settings);
+      const detected = detectTermByDate(
+        recordData.date,
+        configs,
+        prev.settings.academicYear
+      );
+      const newRecord: ConductRecord = {
+        ...recordData,
+        academicYear: recordData.academicYear
+          ? normalizeAcademicYear(recordData.academicYear)
+          : detected.academicYear,
+        semester: recordData.semester || detected.semester,
+        id: `cd-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      };
+      return {
+        ...prev,
+        conduct: [newRecord, ...prev.conduct],
+      };
+    });
+  };
+
+  const handleUpdateConductRecord = (updatedRecord: ConductRecord) => {
+    setAppState((prev) => {
+      const configs = getAcademicYearsConfig(prev.settings);
+      const detected = detectTermByDate(
+        updatedRecord.date,
+        configs,
+        prev.settings.academicYear
+      );
+      const normalizedRecord: ConductRecord = {
+        ...updatedRecord,
+        academicYear: updatedRecord.academicYear
+          ? normalizeAcademicYear(updatedRecord.academicYear)
+          : detected.academicYear,
+        semester: updatedRecord.semester || detected.semester,
+      };
+      return {
+        ...prev,
+        conduct: prev.conduct.map((c) =>
+          c.id === normalizedRecord.id ? normalizedRecord : c
+        ),
+      };
+    });
   };
 
   const handleDeleteConductRecord = (recordId: string) => {
@@ -735,6 +776,7 @@ export default function App() {
                 setActiveStudentModalId(id);
               }}
               onAddConductRecord={handleAddConductRecord}
+              onUpdateConductRecord={handleUpdateConductRecord}
               onDeleteConductRecord={handleDeleteConductRecord}
               onShowToast={showToast}
               onOpenExcelImport={() => setIsExcelModalOpen(true)}
@@ -760,9 +802,14 @@ export default function App() {
               students={activeStudents}
               criteria={appState.criteria}
               conduct={appState.conduct}
+              settings={appState.settings}
+              classNameTitle={currentClass.name}
+              isTeacherLoggedIn={isTeacherLoggedIn}
               onAddConductRecord={handleAddConductRecord}
+              onUpdateConductRecord={handleUpdateConductRecord}
               onDeleteConductRecord={handleDeleteConductRecord}
               onUpdateCriteria={handleUpdateCriteria}
+              onUpdateSettings={handleUpdateSettings}
               onShowToast={showToast}
               onOpenStudentProfile={handleOpenStudentProfile}
             />

@@ -2,6 +2,7 @@
 // Dễ dàng thay đổi danh sách học sinh và tiêu chí ở file này
 
 import { Student, ConductCriterion, AttendanceRecord, ConductRecord, DiaryEntry, TaskItem, QuickNote, ClassSettings, ClassProfile } from '../types';
+import { DEFAULT_ACADEMIC_YEARS_CONFIG, detectTermByDate } from '../utils/conductHelpers';
 
 export const DEFAULT_CLASSES: ClassProfile[] = [
   { id: 'class-9a5', name: 'Lớp 9A5', grade: 9, academicYear: '2026 - 2027', room: 'Phòng 305' },
@@ -28,6 +29,7 @@ export const DEFAULT_SETTINGS: ClassSettings = {
       datMin: 50,
     },
   },
+  academicYearsConfig: DEFAULT_ACADEMIC_YEARS_CONFIG,
 };
 
 // Danh sách 10 học sinh giả lập Lớp 9A5

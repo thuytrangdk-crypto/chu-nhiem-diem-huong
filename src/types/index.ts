@@ -58,10 +58,22 @@ export interface ConductCriterion {
   category: string;
 }
 
+export type SemesterKey = 'HK1' | 'HK2';
+
+export interface AcademicYearConfig {
+  academicYear: string; // e.g., "2026 - 2027"
+  hk1Start: string;     // YYYY-MM-DD
+  hk1End: string;       // YYYY-MM-DD
+  hk2Start: string;     // YYYY-MM-DD
+  hk2End: string;       // YYYY-MM-DD
+}
+
 export interface ConductRecord {
   id: string;
   date: string; // YYYY-MM-DD
   studentId: string;
+  academicYear?: string; // e.g., "2026 - 2027"
+  semester?: SemesterKey; // 'HK1' | 'HK2'
   criterionId?: string;
   criterionName: string;
   points: number;
@@ -120,6 +132,7 @@ export interface ClassSettings {
   targetStudentsCount: number;
   teacherPassword?: string; // Mật khẩu đăng nhập của GVCN
   ratingThresholds?: ConductRatingThresholds;
+  academicYearsConfig?: AcademicYearConfig[];
 }
 
 export type UserRole = 'teacher' | 'student';

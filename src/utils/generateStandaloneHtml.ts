@@ -189,7 +189,7 @@ export function generateStandaloneHtml(state: AppState): string {
         const records = data.conduct.filter(c => c.studentId === studentId);
         const praises = records.filter(c => c.type === 'praise').reduce((sum, c) => sum + Math.abs(c.points), 0);
         const reminders = records.filter(c => c.type === 'reminder').reduce((sum, c) => sum + Math.abs(c.points), 0);
-        const score = 100 + praises - reminders;
+        const score = 200 + praises - reminders;
         return { score, praises, reminders, ratingInfo: calculateRating(score) };
       };
 

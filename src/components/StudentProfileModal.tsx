@@ -29,12 +29,29 @@ import {
   Student,
   AttendanceRecord,
   ConductRecord,
-  ConductRating,
   ConductCriterion,
   ConductRatingThresholds,
+  ClassSettings,
+  SemesterKey,
   UserSession,
 } from '../types';
 import { formatDateVN } from '../utils/storage';
+import {
+  SEMESTER_BASE_SCORE,
+  calculateConductRating,
+  computeStudentSemesterConduct,
+  detectTermByDate,
+  filterConductByTerm,
+  getAcademicYearsConfig,
+  getActiveTerm,
+  getAllAcademicYears,
+  getSemesterLabel,
+  getTodayVNDateString,
+  normalizeAcademicYear,
+  resolveRecordTerm,
+} from '../utils/conductHelpers';
+
+export { calculateConductRating };
 
 interface StudentProfileModalProps {
   isOpen: boolean;
@@ -45,62 +62,14 @@ interface StudentProfileModalProps {
   currentUser?: UserSession | null;
   isTeacherRole?: boolean;
   ratingThresholds?: ConductRatingThresholds;
+  settings?: ClassSettings;
   onClose: () => void;
   onOpenOwnProfile?: () => void;
   onEditStudent: (student: Student) => void;
   onAddConductRecord: (record: Omit<ConductRecord, 'id'>) => void;
+  onUpdateConductRecord?: (record: ConductRecord) => void;
   onDeleteConductRecord?: (recordId: string) => void;
   onShowToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
-}
-
-export function calculateConductRating(
-  score: number,
-  ratingThresholds?: ConductRatingThresholds
-): {
-  rating: ConductRating;
-  color: string;
-  badgeBg: string;
-  badgeText: string;
-  desc: string;
-} {
-  const totMin = ratingThresholds?.year?.totMin ?? 90;
-  const khaMin = ratingThresholds?.year?.khaMin ?? 75;
-  const datMin = ratingThresholds?.year?.datMin ?? 50;
-
-  if (score >= totMin) {
-    return {
-      rating: 'Tốt',
-      color: 'emerald',
-      badgeBg: 'bg-emerald-100 border-emerald-300',
-      badgeText: 'text-emerald-800',
-      desc: 'Rèn luyện xuất sắc, gương mẫu chấp hành tốt nội quy lớp và nhà trường.',
-    };
-  }
-  if (score >= khaMin) {
-    return {
-      rating: 'Khá',
-      color: 'blue',
-      badgeBg: 'bg-blue-100 border-blue-300',
-      badgeText: 'text-blue-800',
-      desc: 'Ý thức nề nếp tốt, hoàn thành các nhiệm vụ được giao.',
-    };
-  }
-  if (score >= datMin) {
-    return {
-      rating: 'Đạt',
-      color: 'amber',
-      badgeBg: 'bg-amber-100 border-amber-300',
-      badgeText: 'text-amber-800',
-      desc: 'Cần nâng cao ý thức rèn luyện, còn vi phạm một số nội quy nề nếp.',
-    };
-  }
-  return {
-    rating: 'Chưa đạt',
-    color: 'rose',
-    badgeBg: 'bg-rose-100 border-rose-300',
-    badgeText: 'text-rose-800',
-    desc: 'Vi phạm nhiều lần nề nếp kỷ luật, cần giáo viên và gia đình phối hợp theo dõi.',
-  };
 }
 
 export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
@@ -112,10 +81,12 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
   currentUser,
   isTeacherRole = true,
   ratingThresholds,
+  settings,
   onClose,
   onOpenOwnProfile,
   onEditStudent,
   onAddConductRecord,
+  onUpdateConductRecord,
   onDeleteConductRecord,
   onShowToast,
 }) => {
@@ -123,21 +94,57 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
   const [activeTab, setActiveTab] = useState<'info' | 'attendance' | 'academic' | 'conduct' | 'contact'>('conduct');
   const [copiedPhone, setCopiedPhone] = useState(false);
 
-  // Form Ghi nhận Sự việc (như ảnh mẫu)
-  const [eventDate, setEventDate] = useState<string>(() => {
-    const today = new Date();
-    const y = today.getFullYear();
-    const m = String(today.getMonth() + 1).padStart(2, '0');
-    const d = String(today.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
-  });
+  const effectiveThresholds = ratingThresholds || settings?.ratingThresholds;
+  const yearConfigs = React.useMemo(() => getAcademicYearsConfig(settings), [settings]);
+  const activeTerm = React.useMemo(() => getActiveTerm(settings), [settings]);
+  const availableAcademicYears = React.useMemo(
+    () => getAllAcademicYears(settings, conduct),
+    [settings, conduct]
+  );
+
+  // Bộ lọc Năm học & Học kỳ
+  const [selectedAcademicYear, setSelectedAcademicYear] = useState<string>(activeTerm.academicYear);
+  const [selectedSemesterFilter, setSelectedSemesterFilter] = useState<SemesterKey | 'ALL'>(activeTerm.semester);
+
+  React.useEffect(() => {
+    if (isOpen) {
+      setSelectedAcademicYear(activeTerm.academicYear);
+      setSelectedSemesterFilter(activeTerm.semester);
+    }
+  }, [isOpen, activeTerm.academicYear, activeTerm.semester]);
+
+  // Form Ghi nhận Sự việc
+  const [eventDate, setEventDate] = useState<string>(() => getTodayVNDateString());
   const [selectedEventCriterion, setSelectedEventCriterion] = useState<string>('Đi học muộn (-1đ)');
   const [eventDetails, setEventDetails] = useState<string>('');
   const [customEventName, setCustomEventName] = useState<string>('');
   const [customEventPoints, setCustomEventPoints] = useState<number>(-1);
+  const [manualTermYear, setManualTermYear] = useState<string>(activeTerm.academicYear);
+  const [manualTermSemester, setManualTermSemester] = useState<SemesterKey>(activeTerm.semester);
 
-  // Kỳ đánh giá (Tháng)
-  const [selectedEvaluationMonth, setSelectedEvaluationMonth] = useState<string>('10/2026');
+  // Modal Chỉnh sửa sự việc thi đua
+  const [editingRecord, setEditingRecord] = useState<ConductRecord | null>(null);
+  const [editDate, setEditDate] = useState<string>('');
+  const [editCriterionName, setEditCriterionName] = useState<string>('');
+  const [editPoints, setEditPoints] = useState<number>(0);
+  const [editNote, setEditNote] = useState<string>('');
+  const [editAcademicYear, setEditAcademicYear] = useState<string>(activeTerm.academicYear);
+  const [editSemester, setEditSemester] = useState<SemesterKey>(activeTerm.semester);
+
+  const eventTermDetection = React.useMemo(
+    () => detectTermByDate(eventDate, yearConfigs, activeTerm.academicYear),
+    [eventDate, yearConfigs, activeTerm.academicYear]
+  );
+
+  React.useEffect(() => {
+    setManualTermYear(eventTermDetection.academicYear);
+    setManualTermSemester(eventTermDetection.semester);
+  }, [eventTermDetection.academicYear, eventTermDetection.semester]);
+
+  const editTermDetection = React.useMemo(
+    () => detectTermByDate(editDate, yearConfigs, activeTerm.academicYear),
+    [editDate, yearConfigs, activeTerm.academicYear]
+  );
 
   // Danh sách các tùy chọn sự việc động từ criteria (TOÀN BỘ HOOKS PHẢI NẰM TRƯỚC EARLY RETURN)
   const eventOptions = React.useMemo(() => {
@@ -192,44 +199,43 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
   // Dữ liệu thi đua của học sinh này
   const studentConductRecords = safeConduct.filter((c) => c && c.studentId === student.id);
 
-  // Lọc sự việc theo Kỳ đánh giá (Tháng)
-  const filteredConductRecords = studentConductRecords.filter((rec) => {
-    if (!rec || !rec.date) return false;
-    if (selectedEvaluationMonth === 'all') return true;
-    const parts = rec.date.split('-'); // YYYY-MM-DD
-    if (parts.length >= 2) {
-      const year = parts[0];
-      const month = parts[1];
-      const key = `${month}/${year}`;
-      return key === selectedEvaluationMonth;
-    }
-    return true;
-  });
+  // Điểm thi đua CÒN LẠI của HỌC KỲ ĐANG DIỄN RA (luôn hiển thị đúng học kỳ đang diễn ra)
+  const activeSemesterResult = computeStudentSemesterConduct(
+    student.id,
+    safeConduct,
+    activeTerm.academicYear,
+    activeTerm.semester,
+    yearConfigs,
+    effectiveThresholds
+  );
 
-  // Tính tổng điểm trong tháng đã chọn
-  // (Nếu tổng điểm cộng - trừ = 0, hiển thị 0; nếu có điểm, hiển thị số điểm cộng/trừ)
-  const monthTotalDelta = filteredConductRecords.reduce((sum, c) => sum + (c.points || 0), 0);
+  // Điểm thi đua từng học kỳ trong Năm học đang lọc
+  const hk1Result = computeStudentSemesterConduct(
+    student.id,
+    safeConduct,
+    selectedAcademicYear,
+    'HK1',
+    yearConfigs,
+    effectiveThresholds
+  );
+  const hk2Result = computeStudentSemesterConduct(
+    student.id,
+    safeConduct,
+    selectedAcademicYear,
+    'HK2',
+    yearConfigs,
+    effectiveThresholds
+  );
 
-  // Tính điểm tổng kết cả năm của học sinh (Điểm chuẩn 100 + cộng - trừ)
-  const cumulativePraises = studentConductRecords
-    .filter((c) => c.type === 'praise')
-    .reduce((sum, c) => sum + Math.abs(c.points || 0), 0);
-  const cumulativeReminders = studentConductRecords
-    .filter((c) => c.type === 'reminder')
-    .reduce((sum, c) => sum + Math.abs(c.points || 0), 0);
-  const cumulativeFinalScore = 100 + cumulativePraises - cumulativeReminders;
+  // Danh sách sự việc theo bộ lọc Năm học + Học kỳ (sắp xếp mới nhất lên đầu)
+  const filteredConductRecords = filterConductByTerm(
+    studentConductRecords,
+    selectedAcademicYear,
+    selectedSemesterFilter,
+    yearConfigs
+  ).sort((a, b) => (b.date || '').localeCompare(a.date || ''));
 
-  // Xếp loại dựa vào điểm tháng và điểm lũy kế
-  const monthThresh = {
-    totMin: ratingThresholds?.month?.totMin ?? 0,
-    khaMin: ratingThresholds?.month?.khaMin ?? -3,
-    datMin: ratingThresholds?.month?.datMin ?? -7,
-  };
-  let monthRating = 'Tốt';
-  if (monthTotalDelta >= monthThresh.totMin) monthRating = 'Tốt';
-  else if (monthTotalDelta >= monthThresh.khaMin) monthRating = 'Khá';
-  else if (monthTotalDelta >= monthThresh.datMin) monthRating = 'Đạt';
-  else monthRating = 'Chưa đạt';
+  const currentViewedResult = selectedSemesterFilter === 'HK2' ? hk2Result : hk1Result;
 
   const currentSelectedOption = eventOptions.find((o) => o.label === selectedEventCriterion);
   const currentDisplayPoints =
@@ -258,10 +264,18 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
     } else {
       const match = eventOptions.find((o) => o.label === selectedEventCriterion);
       if (match) {
+        recordName = match.name;
         points = match.points;
         type = match.type === 'praise' ? 'praise' : 'reminder';
       }
     }
+
+    const targetAcademicYear = eventTermDetection.matched
+      ? eventTermDetection.academicYear
+      : normalizeAcademicYear(manualTermYear);
+    const targetSemester = eventTermDetection.matched
+      ? eventTermDetection.semester
+      : manualTermSemester;
 
     onAddConductRecord({
       date: eventDate,
@@ -270,13 +284,71 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
       points: points,
       type: type,
       note: eventDetails.trim() || undefined,
+      academicYear: targetAcademicYear,
+      semester: targetSemester,
     });
 
-    onShowToast(`Đã lưu ghi nhận sự việc cho ${student.name}!`);
+    const termLabel = `${getSemesterLabel(targetSemester)} (${targetAcademicYear})`;
+    if (!eventTermDetection.matched) {
+      onShowToast(
+        `Đã lưu vào ${termLabel}. Lưu ý: ngày ${formatDateVN(eventDate)} nằm ngoài khoảng thời gian cấu hình học kỳ!`,
+        'info'
+      );
+    } else {
+      onShowToast(`Đã lưu ghi nhận sự việc cho ${student.name} (${termLabel})!`);
+    }
+
+    // Tự động đồng bộ bộ lọc xem sang học kỳ vừa ghi nhận để giáo viên thấy ngay kết quả cập nhật
+    setSelectedAcademicYear(targetAcademicYear);
+    if (selectedSemesterFilter !== 'ALL') {
+      setSelectedSemesterFilter(targetSemester);
+    }
+
     setEventDetails('');
     if (selectedEventCriterion === 'Sự việc khác (Tùy chỉnh)') {
       setCustomEventName('');
     }
+  };
+
+  // Mở modal chỉnh sửa sự việc
+  const openEditRecordModal = (rec: ConductRecord) => {
+    const term = resolveRecordTerm(rec, yearConfigs, activeTerm.academicYear);
+    setEditingRecord(rec);
+    setEditDate(rec.date);
+    setEditCriterionName(rec.criterionName);
+    setEditPoints(rec.points);
+    setEditNote(rec.note || '');
+    setEditAcademicYear(term.academicYear);
+    setEditSemester(term.semester);
+  };
+
+  const handleSaveEditedRecord = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingRecord || !onUpdateConductRecord) return;
+    if (!editCriterionName.trim()) {
+      onShowToast('Vui lòng nhập nội dung sự việc', 'error');
+      return;
+    }
+
+    const nextYear = editTermDetection.matched
+      ? editTermDetection.academicYear
+      : normalizeAcademicYear(editAcademicYear);
+    const nextSemester = editTermDetection.matched ? editTermDetection.semester : editSemester;
+    const pts = Number(editPoints) || 0;
+
+    onUpdateConductRecord({
+      ...editingRecord,
+      date: editDate,
+      criterionName: editCriterionName.trim(),
+      points: pts,
+      type: pts >= 0 ? 'praise' : 'reminder',
+      note: editNote.trim() || undefined,
+      academicYear: nextYear,
+      semester: nextSemester,
+    });
+
+    onShowToast(`Đã cập nhật sự việc & tính lại điểm ${getSemesterLabel(nextSemester)} (${nextYear})`);
+    setEditingRecord(null);
   };
 
   // Nếu là tài khoản học sinh nhưng đang bấm vào học sinh khác: Bảo vệ riêng tư
@@ -493,6 +565,45 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
                         className="w-full px-3.5 py-2.5 bg-white border border-slate-300 rounded-xl text-xs sm:text-sm font-medium text-slate-800 focus:outline-hidden focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-all cursor-pointer shadow-2xs disabled:bg-slate-50 disabled:cursor-not-allowed"
                       />
                     </div>
+                    {/* Tự động xác định học kỳ & cảnh báo ngoài khoảng cấu hình */}
+                    {eventTermDetection.matched ? (
+                      <div className="mt-1.5 flex items-center justify-between text-[11px] bg-indigo-50/80 text-indigo-800 px-2.5 py-1.5 rounded-lg border border-indigo-200/80">
+                        <span className="font-medium">Tự động tính vào:</span>
+                        <span className="font-bold">
+                          {getSemesterLabel(eventTermDetection.semester)} • {eventTermDetection.academicYear}
+                        </span>
+                      </div>
+                    ) : (
+                      <div className="mt-2 p-2.5 bg-amber-50 border border-amber-300 rounded-xl space-y-2 text-[11px] text-amber-900">
+                        <div className="flex items-start gap-1.5 font-semibold">
+                          <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
+                          <span>
+                            Ngày {formatDateVN(eventDate)} nằm ngoài khoảng thời gian học kỳ đã cấu hình. Vui lòng kiểm tra lại ngày hoặc chọn học kỳ ghi nhận:
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-2 gap-1.5">
+                          <select
+                            disabled={!isTeacherRole}
+                            value={manualTermYear}
+                            onChange={(e) => setManualTermYear(e.target.value)}
+                            className="p-1.5 bg-white border border-amber-300 rounded-lg text-[11px] font-semibold text-slate-800"
+                          >
+                            {availableAcademicYears.map((yr) => (
+                              <option key={yr} value={yr}>{yr}</option>
+                            ))}
+                          </select>
+                          <select
+                            disabled={!isTeacherRole}
+                            value={manualTermSemester}
+                            onChange={(e) => setManualTermSemester(e.target.value as SemesterKey)}
+                            className="p-1.5 bg-white border border-amber-300 rounded-lg text-[11px] font-semibold text-slate-800"
+                          >
+                            <option value="HK1">Học kỳ I</option>
+                            <option value="HK2">Học kỳ II</option>
+                          </select>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Trường: Sự việc * */}
@@ -634,78 +745,144 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
                 </form>
               </div>
 
-              {/* CỘT PHẢI (Khoảng 7-8 cols): THỐNG KÊ THÁNG CỐ ĐỊNH & BẢNG LỊCH SỬ CÓ THANH CUỘN */}
-              <div className="lg:col-span-7 flex flex-col space-y-4">
-                {/* THẺ ĐÁNH GIÁ (THÁNG) - TỔNG ĐIỂM - XẾP LOẠI (CỐ ĐỊNH HOÀN TOÀN, KHÔNG BỊ CUỘN MẤT) */}
-                <div className="shrink-0 bg-white p-4 sm:p-5 rounded-2xl border border-slate-200/90 shadow-xs flex flex-wrap items-center justify-between gap-4">
+              {/* CỘT PHẢI (Khoảng 7 cols): ĐIỂM CÒN LẠI HỌC KỲ HIỆN TẠI, BỘ LỌC HỌC KỲ & BẢNG LỊCH SỬ */}
+              <div className="lg:col-span-7 flex flex-col space-y-3.5">
+                {/* Ô ĐIỂM THI ĐUA CÒN LẠI (CHỈ HIỂN THỊ ĐIỂM CỦA HỌC KỲ ĐANG DIỄN RA) */}
+                <div className="shrink-0 bg-gradient-to-r from-indigo-600 via-blue-600 to-teal-600 text-white p-4 rounded-2xl shadow-sm flex flex-wrap items-center justify-between gap-3">
                   <div>
-                    <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-1.5">
-                      KỲ ĐÁNH GIÁ (THÁNG)
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className="text-[11px] font-bold uppercase tracking-wider text-blue-100">
+                        ĐIỂM THI ĐUA CÒN LẠI
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-white/20 text-white">
+                        {getSemesterLabel(activeTerm.semester)} • {activeTerm.academicYear}
+                      </span>
                     </div>
-                    <select
-                      value={selectedEvaluationMonth}
-                      onChange={(e) => setSelectedEvaluationMonth(e.target.value)}
-                      className="px-3.5 py-2 bg-white border border-slate-300 rounded-xl text-xs sm:text-sm font-bold text-slate-800 focus:outline-hidden focus:border-indigo-500 cursor-pointer shadow-2xs"
-                    >
-                      <option value="10/2026">Tháng 10/2026</option>
-                      <option value="09/2026">Tháng 09/2026</option>
-                      <option value="11/2026">Tháng 11/2026</option>
-                      <option value="12/2026">Tháng 12/2026</option>
-                      <option value="01/2027">Tháng 01/2027</option>
-                      <option value="02/2027">Tháng 02/2027</option>
-                      <option value="03/2027">Tháng 03/2027</option>
-                      <option value="04/2027">Tháng 04/2027</option>
-                      <option value="05/2027">Tháng 05/2027</option>
-                      <option value="all">Tất cả các tháng</option>
-                    </select>
+                    <div className="text-xs text-blue-100">
+                      Mức khởi tạo: <b className="text-white">{SEMESTER_BASE_SCORE}đ</b> • Thưởng:{' '}
+                      <b className="text-emerald-200">+{activeSemesterResult.praisePoints}</b> • Trừ:{' '}
+                      <b className="text-rose-200">-{activeSemesterResult.reminderPoints}</b>
+                    </div>
                   </div>
 
-                  <div className="flex items-center space-x-6 sm:space-x-8">
-                    {/* TỔNG ĐIỂM */}
+                  <div className="flex items-center gap-3">
                     <div className="text-right">
-                      <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-0.5">
-                        TỔNG ĐIỂM
-                      </div>
-                      <div
-                        className={`text-2xl sm:text-3xl font-black ${
-                          monthTotalDelta >= 0 ? 'text-emerald-600' : 'text-rose-600'
-                        }`}
-                      >
-                        {monthTotalDelta > 0 ? `+${monthTotalDelta}` : monthTotalDelta}
+                      <div className="text-2xl sm:text-3xl font-black font-mono leading-none">
+                        {activeSemesterResult.totalScore}/{SEMESTER_BASE_SCORE}
+                        <span className="text-sm font-bold ml-1 text-blue-100">điểm</span>
                       </div>
                     </div>
-
-                    {/* Dải phân cách dọc | */}
-                    <div className="h-8 w-px bg-slate-200"></div>
-
-                    {/* XẾP LOẠI */}
-                    <div>
-                      <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-0.5">
-                        XẾP LOẠI
-                      </div>
-                      <div
-                        className={`text-xl sm:text-2xl font-black ${
-                          monthRating === 'Tốt'
-                            ? 'text-emerald-600'
-                            : monthRating === 'Khá'
-                            ? 'text-blue-600'
-                            : monthRating === 'Đạt'
-                            ? 'text-amber-600'
-                            : 'text-rose-600'
-                        }`}
-                      >
-                        {monthRating}
-                      </div>
-                    </div>
+                    <span className="px-2.5 py-1 rounded-xl text-xs font-black bg-white text-slate-900 shadow-2xs">
+                      {activeSemesterResult.ratingInfo.rating}
+                    </span>
                   </div>
                 </div>
 
-                {/* THẺ BẢNG LỊCH SỬ SỰ VIỆC (THANH CUỘN CHỈ XUẤT HIỆN Ở BẢNG NÀY) */}
+                {/* BỘ LỌC NĂM HỌC & HỌC KỲ + KẾT QUẢ THEO KỲ ĐANG XEM */}
+                <div className="shrink-0 bg-white p-4 rounded-2xl border border-slate-200/90 shadow-xs space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <select
+                        value={selectedAcademicYear}
+                        onChange={(e) => setSelectedAcademicYear(e.target.value)}
+                        className="px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold text-slate-800 focus:outline-hidden focus:border-indigo-500 cursor-pointer"
+                        title="Chọn năm học"
+                      >
+                        {availableAcademicYears.map((yr) => (
+                          <option key={yr} value={yr}>Năm học {yr}</option>
+                        ))}
+                      </select>
+
+                      <div className="inline-flex rounded-xl bg-slate-100 p-1 border border-slate-200">
+                        {([
+                          { id: 'HK1', label: 'Học kỳ I' },
+                          { id: 'HK2', label: 'Học kỳ II' },
+                          { id: 'ALL', label: 'Cả năm' },
+                        ] as const).map((opt) => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => setSelectedSemesterFilter(opt.id)}
+                            className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                              selectedSemesterFilter === opt.id
+                                ? 'bg-white text-indigo-700 shadow-2xs'
+                                : 'text-slate-600 hover:text-slate-900'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    {selectedSemesterFilter !== 'ALL' && (
+                      <div className="flex items-center space-x-4">
+                        <div className="text-right">
+                          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                            ĐIỂM {getSemesterLabel(selectedSemesterFilter).toUpperCase()}
+                          </div>
+                          <div className="text-xl font-black font-mono text-slate-900">
+                            {currentViewedResult.totalScore}
+                            <span className="text-xs font-bold text-slate-400">/{SEMESTER_BASE_SCORE}đ</span>
+                          </div>
+                        </div>
+                        <div className="h-7 w-px bg-slate-200"></div>
+                        <div>
+                          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                            XẾP LOẠI
+                          </div>
+                          <span
+                            className={`inline-block px-2 py-0.5 rounded-lg text-xs font-black border ${currentViewedResult.ratingInfo.badgeBg} ${currentViewedResult.ratingInfo.badgeText}`}
+                          >
+                            {currentViewedResult.ratingInfo.rating}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Nếu chọn Cả năm: hiển thị điểm tổng kết từng học kỳ riêng biệt (không cộng 400) */}
+                  {selectedSemesterFilter === 'ALL' && (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                      <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between">
+                        <div>
+                          <div className="text-[11px] font-bold text-slate-500 uppercase">Học kỳ I</div>
+                          <div className="text-lg font-black font-mono text-slate-900">
+                            {hk1Result.totalScore}/{SEMESTER_BASE_SCORE}đ
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            +{hk1Result.praisePoints}đ thưởng / -{hk1Result.reminderPoints}đ trừ
+                          </div>
+                        </div>
+                        <span className={`px-2.5 py-1 rounded-lg text-xs font-bold border ${hk1Result.ratingInfo.badgeBg} ${hk1Result.ratingInfo.badgeText}`}>
+                          {hk1Result.ratingInfo.rating}
+                        </span>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between">
+                        <div>
+                          <div className="text-[11px] font-bold text-slate-500 uppercase">Học kỳ II</div>
+                          <div className="text-lg font-black font-mono text-slate-900">
+                            {hk2Result.totalScore}/{SEMESTER_BASE_SCORE}đ
+                          </div>
+                          <div className="text-[11px] text-slate-500">
+                            +{hk2Result.praisePoints}đ thưởng / -{hk2Result.reminderPoints}đ trừ
+                          </div>
+                        </div>
+                        <span className={`px-2.5 py-1 rounded-lg text-xs font-bold border ${hk2Result.ratingInfo.badgeBg} ${hk2Result.ratingInfo.badgeText}`}>
+                          {hk2Result.ratingInfo.rating}
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* THẺ BẢNG LỊCH SỬ SỰ VIỆC */}
                 <div className="bg-white p-4 sm:p-5 rounded-2xl border border-slate-200/90 shadow-xs flex flex-col space-y-3">
                   <div className="shrink-0 flex items-center justify-between">
                     <div>
                       <h4 className="text-sm sm:text-base font-bold text-slate-900">
-                        Lịch sử sự việc ({selectedEvaluationMonth === 'all' ? 'Tất cả' : `Tháng ${selectedEvaluationMonth}`})
+                        Lịch sử sự việc ({selectedSemesterFilter === 'ALL' ? `Cả năm ${selectedAcademicYear}` : `${getSemesterLabel(selectedSemesterFilter)} • ${selectedAcademicYear}`})
                       </h4>
                     </div>
                     <span className="text-xs font-semibold text-slate-600 bg-slate-100 px-2.5 py-1 rounded-lg border border-slate-200">
@@ -713,88 +890,107 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
                     </span>
                   </div>
 
-                  {/* KHUNG CUỘN CHO BẢNG SỰ VIỆC (CHỈ DUY NHẤT BẢNG NÀY CÓ THANH CUỘN MƯỢT MÀ) */}
-                  <div className="max-h-[260px] sm:max-h-[300px] lg:max-h-[340px] overflow-y-auto overflow-x-auto rounded-xl border border-slate-200/90 shadow-2xs divide-y divide-slate-100 custom-scrollbar scroll-smooth">
+                  {/* KHUNG CUỘN CHO BẢNG SỰ VIỆC */}
+                  <div className="max-h-[240px] sm:max-h-[260px] lg:max-h-[280px] overflow-y-auto overflow-x-auto rounded-xl border border-slate-200/90 shadow-2xs divide-y divide-slate-100 custom-scrollbar scroll-smooth">
                     <table className="w-full text-left text-xs">
                       <thead className="sticky top-0 bg-slate-100/95 backdrop-blur-xs z-10 border-b border-slate-200 text-slate-600 font-bold shadow-2xs">
                         <tr>
-                          <th className="py-2.5 px-3">Ngày</th>
+                          <th className="py-2.5 px-3">Ngày / Kỳ</th>
                           <th className="py-2.5 px-3">Sự việc</th>
                           <th className="py-2.5 px-3 text-center">Điểm</th>
-                          {isTeacherRole && <th className="py-2.5 px-3 text-right">Xóa</th>}
+                          {isTeacherRole && <th className="py-2.5 px-3 text-right">Thao tác</th>}
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 bg-white">
                         {filteredConductRecords.length === 0 ? (
                           <tr>
                             <td colSpan={isTeacherRole ? 4 : 3} className="py-10 text-center text-slate-400">
-                              Chưa có sự việc nào được ghi nhận trong {selectedEvaluationMonth === 'all' ? 'năm học này' : `Tháng ${selectedEvaluationMonth}`}.
+                              Chưa có sự việc nào được ghi nhận trong {selectedSemesterFilter === 'ALL' ? `năm học ${selectedAcademicYear}` : `${getSemesterLabel(selectedSemesterFilter)} (${selectedAcademicYear})`}.
                             </td>
                           </tr>
                         ) : (
-                          filteredConductRecords.map((rec) => (
-                            <tr key={rec.id} className="hover:bg-slate-50/80 transition-colors">
-                              {/* Ngày */}
-                              <td className="py-3 px-3 font-medium text-slate-600 whitespace-nowrap">
-                                {formatDateVN(rec.date)}
-                              </td>
-
-                              {/* Sự việc & Chi tiết */}
-                              <td className="py-3 px-3">
-                                <div className="font-semibold text-slate-800">
-                                  {rec.criterionName}
-                                </div>
-                                {rec.note && (
-                                  <div className="text-[11px] text-slate-500 italic mt-0.5">
-                                    {rec.note}
-                                  </div>
-                                )}
-                              </td>
-
-                              {/* Điểm */}
-                              <td className="py-3 px-3 text-center whitespace-nowrap">
-                                <span
-                                  className={`inline-block px-2 py-0.5 rounded text-xs font-bold font-mono ${
-                                    rec.points > 0
-                                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
-                                      : 'bg-rose-50 text-rose-700 border border-rose-200'
-                                  }`}
-                                >
-                                  {rec.points > 0 ? `+${rec.points}đ` : `${rec.points}đ`}
-                                </span>
-                              </td>
-
-                              {/* Nút Xóa (Chỉ cho GVCN) */}
-                              {isTeacherRole && (
-                                <td className="py-3 px-3 text-right whitespace-nowrap">
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      if (onDeleteConductRecord) {
-                                        onDeleteConductRecord(rec.id);
-                                      }
-                                    }}
-                                    className="text-xs font-semibold text-rose-600 hover:text-rose-800 hover:underline p-1 cursor-pointer"
-                                    title="Xóa sự việc này"
-                                  >
-                                    Xóa
-                                  </button>
+                          filteredConductRecords.map((rec) => {
+                            const recTerm = resolveRecordTerm(rec, yearConfigs, selectedAcademicYear);
+                            return (
+                              <tr key={rec.id} className="hover:bg-slate-50/80 transition-colors">
+                                {/* Ngày & Học kỳ */}
+                                <td className="py-2.5 px-3 font-medium text-slate-600 whitespace-nowrap">
+                                  <div>{formatDateVN(rec.date)}</div>
+                                  <span className={`inline-block mt-0.5 px-1.5 py-0.2 rounded text-[10px] font-bold ${
+                                    recTerm.semester === 'HK1'
+                                      ? 'bg-indigo-50 text-indigo-700 border border-indigo-200'
+                                      : 'bg-teal-50 text-teal-700 border border-teal-200'
+                                  }`}>
+                                    {recTerm.semester === 'HK1' ? 'HK I' : 'HK II'}
+                                  </span>
                                 </td>
-                              )}
-                            </tr>
-                          ))
+
+                                {/* Sự việc & Chi tiết */}
+                                <td className="py-2.5 px-3">
+                                  <div className="font-semibold text-slate-800">
+                                    {rec.criterionName}
+                                  </div>
+                                  {rec.note && (
+                                    <div className="text-[11px] text-slate-500 italic mt-0.5">
+                                      {rec.note}
+                                    </div>
+                                  )}
+                                </td>
+
+                                {/* Điểm */}
+                                <td className="py-2.5 px-3 text-center whitespace-nowrap">
+                                  <span
+                                    className={`inline-block px-2 py-0.5 rounded text-xs font-bold font-mono ${
+                                      rec.points > 0
+                                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                        : 'bg-rose-50 text-rose-700 border border-rose-200'
+                                    }`}
+                                  >
+                                    {rec.points > 0 ? `+${rec.points}đ` : `${rec.points}đ`}
+                                  </span>
+                                </td>
+
+                                {/* Nút Sửa / Xóa (Chỉ cho GVCN) */}
+                                {isTeacherRole && (
+                                  <td className="py-2.5 px-3 text-right whitespace-nowrap">
+                                    <div className="inline-flex items-center gap-1.5">
+                                      {onUpdateConductRecord && (
+                                        <button
+                                          type="button"
+                                          onClick={() => openEditRecordModal(rec)}
+                                          className="text-xs font-semibold text-blue-600 hover:text-blue-800 hover:underline p-1 cursor-pointer"
+                                          title="Sửa sự việc này"
+                                        >
+                                          Sửa
+                                        </button>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          if (onDeleteConductRecord) {
+                                            onDeleteConductRecord(rec.id);
+                                          }
+                                        }}
+                                        className="text-xs font-semibold text-rose-600 hover:text-rose-800 hover:underline p-1 cursor-pointer"
+                                        title="Xóa sự việc này"
+                                      >
+                                        Xóa
+                                      </button>
+                                    </div>
+                                  </td>
+                                )}
+                              </tr>
+                            );
+                          })
                         )}
                       </tbody>
                     </table>
                   </div>
 
-                  {/* Tổng kết lũy kế cả năm học */}
-                  <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
+                  {/* Ghi chú công thức độc lập từng học kỳ */}
+                  <div className="pt-2.5 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
                     <span>
-                      Điểm thi đua toàn năm: <b className="text-slate-800 font-mono">{cumulativeFinalScore}đ</b> (Chuẩn 100 | +{cumulativePraises} | -{cumulativeReminders})
-                    </span>
-                    <span className="font-semibold text-teal-700">
-                      Hạnh kiểm năm: {calculateConductRating(cumulativeFinalScore, ratingThresholds).rating}
+                      Độc lập từng học kỳ (200đ/HK): HK I <b className="text-slate-800 font-mono">{hk1Result.totalScore}/200</b> ({hk1Result.ratingInfo.rating}) • HK II <b className="text-slate-800 font-mono">{hk2Result.totalScore}/200</b> ({hk2Result.ratingInfo.rating})
                     </span>
                   </div>
                 </div>
@@ -1032,6 +1228,122 @@ export const StudentProfileModal: React.FC<StudentProfileModalProps> = ({
           )}
         </div>
       </div>
+
+      {/* MODAL CHỈNH SỬA SỰ VIỆC THI ĐUA */}
+      {editingRecord && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <div className="bg-white rounded-2xl max-w-md w-full p-5 shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h4 className="text-base font-bold text-slate-900">Chỉnh sửa sự việc thi đua</h4>
+              <button
+                type="button"
+                onClick={() => setEditingRecord(null)}
+                className="p-1 text-slate-400 hover:text-slate-700 rounded-lg hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveEditedRecord} className="mt-4 space-y-3 text-xs">
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Ngày xảy ra *</label>
+                <input
+                  type="date"
+                  required
+                  value={editDate}
+                  onChange={(e) => {
+                    const nextDate = e.target.value;
+                    setEditDate(nextDate);
+                    const detected = detectTermByDate(nextDate, yearConfigs, activeTerm.academicYear);
+                    setEditAcademicYear(detected.academicYear);
+                    setEditSemester(detected.semester);
+                  }}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm text-slate-800"
+                />
+                {editTermDetection.matched ? (
+                  <div className="mt-1.5 text-[11px] bg-indigo-50 text-indigo-800 px-2.5 py-1.5 rounded-lg border border-indigo-200 flex justify-between">
+                    <span>Tính vào học kỳ:</span>
+                    <b>{getSemesterLabel(editTermDetection.semester)} • {editTermDetection.academicYear}</b>
+                  </div>
+                ) : (
+                  <div className="mt-2 p-2.5 bg-amber-50 border border-amber-300 rounded-xl space-y-2 text-[11px] text-amber-900">
+                    <div className="flex items-start gap-1.5 font-semibold">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0 mt-0.5" />
+                      <span>Ngày ngoài khoảng cấu hình học kỳ. Chọn học kỳ áp dụng:</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      <select
+                        value={editAcademicYear}
+                        onChange={(e) => setEditAcademicYear(e.target.value)}
+                        className="p-1.5 bg-white border border-amber-300 rounded-lg font-semibold"
+                      >
+                        {availableAcademicYears.map((yr) => (
+                          <option key={yr} value={yr}>{yr}</option>
+                        ))}
+                      </select>
+                      <select
+                        value={editSemester}
+                        onChange={(e) => setEditSemester(e.target.value as SemesterKey)}
+                        className="p-1.5 bg-white border border-amber-300 rounded-lg font-semibold"
+                      >
+                        <option value="HK1">Học kỳ I</option>
+                        <option value="HK2">Học kỳ II</option>
+                      </select>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Nội dung sự việc *</label>
+                <input
+                  type="text"
+                  required
+                  value={editCriterionName}
+                  onChange={(e) => setEditCriterionName(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm text-slate-800"
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Điểm cộng / trừ *</label>
+                <input
+                  type="number"
+                  required
+                  value={editPoints}
+                  onChange={(e) => setEditPoints(Number(e.target.value))}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm font-mono font-bold text-slate-800"
+                />
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">Ghi chú chi tiết</label>
+                <textarea
+                  rows={2}
+                  value={editNote}
+                  onChange={(e) => setEditNote(e.target.value)}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-xl text-sm text-slate-800 resize-none"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingRecord(null)}
+                  className="px-4 py-2 rounded-xl bg-slate-100 text-slate-700 font-semibold hover:bg-slate-200 cursor-pointer"
+                >
+                  Hủy
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl bg-indigo-600 text-white font-bold hover:bg-indigo-700 cursor-pointer"
+                >
+                  Lưu thay đổi
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

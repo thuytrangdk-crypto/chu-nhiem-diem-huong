@@ -19,11 +19,19 @@ import {
   AlertTriangle,
   Sliders,
   Database,
+  Calendar,
 } from 'lucide-react';
-import { ClassSettings, ConductCriterion, ConductRatingThresholds } from '../types';
-import { AppState, exportBackupJSON, importBackupJSON } from '../utils/storage';
+import { AcademicYearConfig, ClassSettings, ConductCriterion, ConductRatingThresholds } from '../types';
+import { AppState, exportBackupJSON, importBackupJSON, formatDateVN } from '../utils/storage';
 import { generateStandaloneHtml } from '../utils/generateStandaloneHtml';
 import { DEFAULT_CRITERIA } from '../data/sampleData';
+import {
+  buildDefaultAcademicYearConfig,
+  getAcademicYearsConfig,
+  getActiveTerm,
+  getSemesterLabel,
+  normalizeAcademicYear,
+} from '../utils/conductHelpers';
 
 interface SettingsViewProps {
   settings: ClassSettings;
@@ -83,21 +91,72 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   );
 
+  // Academic Years Config State (lịch học kỳ theo từng năm học)
+  const [academicYearsConfig, setAcademicYearsConfig] = useState<AcademicYearConfig[]>(() =>
+    getAcademicYearsConfig(settings)
+  );
+  const [newAcademicYearInput, setNewAcademicYearInput] = useState<string>('2028 - 2029');
+
+  const activeTermPreview = getActiveTerm({
+    ...formData,
+    academicYearsConfig,
+  });
+
+  const validateYearConfigs = (configs: AcademicYearConfig[]): boolean => {
+    for (const cfg of configs) {
+      if (!cfg.hk1Start || !cfg.hk1End || !cfg.hk2Start || !cfg.hk2End) {
+        onShowToast(`Vui lòng nhập đầy đủ ngày bắt đầu/kết thúc cho năm học ${cfg.academicYear}`, 'error');
+        return false;
+      }
+      if (cfg.hk1Start > cfg.hk1End || cfg.hk2Start > cfg.hk2End || cfg.hk1End >= cfg.hk2Start) {
+        onShowToast(
+          `Mốc ngày học kỳ của năm học ${cfg.academicYear} không hợp lệ (HK I phải kết thúc trước khi HK II bắt đầu).`,
+          'error'
+        );
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const handleAddAcademicYearRow = () => {
+    const normalized = normalizeAcademicYear(newAcademicYearInput);
+    if (!/^\d{4}\s-\s\d{4}$/.test(normalized)) {
+      onShowToast('Vui lòng nhập năm học đúng định dạng VD: 2028 - 2029', 'error');
+      return;
+    }
+    if (academicYearsConfig.some((c) => normalizeAcademicYear(c.academicYear) === normalized)) {
+      onShowToast(`Năm học ${normalized} đã có trong danh sách cấu hình`, 'info');
+      return;
+    }
+    setAcademicYearsConfig([...academicYearsConfig, buildDefaultAcademicYearConfig(normalized)]);
+  };
+
   const handleSaveSettings = (e: React.FormEvent) => {
     e.preventDefault();
+    if (!validateYearConfigs(academicYearsConfig)) return;
     const updatedSettings = {
       ...formData,
       ratingThresholds,
+      academicYearsConfig: academicYearsConfig.map((c) => ({
+        ...c,
+        academicYear: normalizeAcademicYear(c.academicYear),
+      })),
     };
     onUpdateSettings(updatedSettings);
-    onShowToast('Đã lưu thông tin lớp và giáo viên thành công!');
+    onShowToast('Đã lưu thông tin lớp, giáo viên và lịch học kỳ thành công!');
   };
 
   const handleSaveCriteriaAndRatings = () => {
+    if (!validateYearConfigs(academicYearsConfig)) return;
     onUpdateCriteria(criteriaList);
     const updatedSettings = {
       ...formData,
       ratingThresholds,
+      academicYearsConfig: academicYearsConfig.map((c) => ({
+        ...c,
+        academicYear: normalizeAcademicYear(c.academicYear),
+      })),
     };
     onUpdateSettings(updatedSettings);
     onShowToast('Đã lưu cài đặt tiêu chí sự việc và khung điểm xếp loại!');
@@ -176,6 +235,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       .then((restored) => {
         onRestoreState(restored);
         setFormData(restored.settings);
+        setAcademicYearsConfig(getAcademicYearsConfig(restored.settings));
         onShowToast('Đã khôi phục dữ liệu từ tệp thành công!');
       })
       .catch((err) => {
@@ -340,10 +400,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               </div>
             </div>
 
-            {/* Cột 2: Xếp loại cả Năm (Lũy kế 100 điểm) */}
+            {/* Cột 2: Xếp loại theo Học kỳ (Khởi tạo 200 điểm/HK) */}
             <div className="bg-white p-4 rounded-xl border border-slate-200 space-y-3">
               <div className="font-bold text-teal-900 border-b border-slate-100 pb-1.5 flex items-center justify-between">
-                <span>🏆 Xếp loại Cả Năm (Chuẩn 100 điểm)</span>
+                <span>🏆 Xếp loại Hạnh kiểm mỗi Học kỳ (Nền 200 điểm/HK)</span>
                 <span className="text-[11px] font-normal text-slate-500">Mức điểm tối thiểu</span>
               </div>
               <div className="space-y-2.5">
@@ -658,7 +718,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
             <div>
               <label className="block font-semibold text-slate-700 mb-1">
-                Học kỳ áp dụng
+                Học kỳ áp dụng (dự phòng khi ngoài lịch)
               </label>
               <select
                 value={formData.semester}
@@ -669,6 +729,113 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 <option value="Học kỳ II">Học kỳ II</option>
                 <option value="Cả năm học">Cả năm học</option>
               </select>
+            </div>
+          </div>
+
+          {/* CẤU HÌNH LỊCH HỌC KỲ TỰ ĐỘNG THEO TỪNG NĂM HỌC */}
+          <div className="mt-5 pt-4 border-t border-slate-100 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Calendar className="w-4 h-4 text-indigo-600" />
+                <span className="font-bold text-slate-800 text-xs sm:text-sm">
+                  Lịch bắt đầu & kết thúc Học kỳ theo Năm học
+                </span>
+              </div>
+              <span className="text-[11px] font-bold px-2.5 py-1 rounded-lg bg-indigo-50 text-indigo-800 border border-indigo-200">
+                Hôm nay tự động xác định: {getSemesterLabel(activeTermPreview.semester)} ({activeTermPreview.academicYear})
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-500">
+              Hệ thống dùng các mốc ngày dưới đây để tự động khởi tạo <b>200/200 điểm</b> độc lập khi sang Học kỳ II hoặc Năm học mới mà không xóa lịch sử cũ.
+            </p>
+
+            <div className="space-y-2.5">
+              {academicYearsConfig.map((cfg, idx) => (
+                <div
+                  key={cfg.academicYear}
+                  className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-2"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-800 text-xs">
+                      Năm học {cfg.academicYear}
+                    </span>
+                    <span className="text-[11px] text-slate-500">
+                      HK I: {formatDateVN(cfg.hk1Start)}–{formatDateVN(cfg.hk1End)} | HK II: {formatDateVN(cfg.hk2Start)}–{formatDateVN(cfg.hk2End)}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[11px]">
+                    <div>
+                      <label className="block text-slate-600 font-semibold mb-1">Bắt đầu HK I</label>
+                      <input
+                        type="date"
+                        value={cfg.hk1Start}
+                        onChange={(e) => {
+                          const next = [...academicYearsConfig];
+                          next[idx] = { ...cfg, hk1Start: e.target.value };
+                          setAcademicYearsConfig(next);
+                        }}
+                        className="w-full p-1.5 bg-white border border-slate-200 rounded-lg font-medium text-slate-800"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-600 font-semibold mb-1">Kết thúc HK I</label>
+                      <input
+                        type="date"
+                        value={cfg.hk1End}
+                        onChange={(e) => {
+                          const next = [...academicYearsConfig];
+                          next[idx] = { ...cfg, hk1End: e.target.value };
+                          setAcademicYearsConfig(next);
+                        }}
+                        className="w-full p-1.5 bg-white border border-slate-200 rounded-lg font-medium text-slate-800"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-600 font-semibold mb-1">Bắt đầu HK II</label>
+                      <input
+                        type="date"
+                        value={cfg.hk2Start}
+                        onChange={(e) => {
+                          const next = [...academicYearsConfig];
+                          next[idx] = { ...cfg, hk2Start: e.target.value };
+                          setAcademicYearsConfig(next);
+                        }}
+                        className="w-full p-1.5 bg-white border border-slate-200 rounded-lg font-medium text-slate-800"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-600 font-semibold mb-1">Kết thúc HK II</label>
+                      <input
+                        type="date"
+                        value={cfg.hk2End}
+                        onChange={(e) => {
+                          const next = [...academicYearsConfig];
+                          next[idx] = { ...cfg, hk2End: e.target.value };
+                          setAcademicYearsConfig(next);
+                        }}
+                        className="w-full p-1.5 bg-white border border-slate-200 rounded-lg font-medium text-slate-800"
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                type="text"
+                value={newAcademicYearInput}
+                onChange={(e) => setNewAcademicYearInput(e.target.value)}
+                placeholder="VD: 2028 - 2029"
+                className="px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800"
+              />
+              <button
+                type="button"
+                onClick={handleAddAcademicYearRow}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-900 text-white rounded-xl text-xs font-semibold cursor-pointer"
+              >
+                + Thêm năm học
+              </button>
             </div>
           </div>
 

@@ -37,9 +37,15 @@ import {
 } from '../types';
 import { formatDateVN } from '../utils/storage';
 import { StudentAuthModal } from './StudentAuthModal';
-import { StudentProfileModal, calculateConductRating } from './StudentProfileModal';
+import { StudentProfileModal } from './StudentProfileModal';
 import { ConductExcelExportModal } from './ConductExcelExportModal';
 import { exportStudentListToExcel } from '../utils/excelImport';
+import {
+  computeStudentSemesterConduct,
+  getAcademicYearsConfig,
+  getActiveTerm,
+  getSemesterLabel,
+} from '../utils/conductHelpers';
 
 interface StudentsViewProps {
   students: Student[];
@@ -56,6 +62,7 @@ interface StudentsViewProps {
   onCloseStudentModal: () => void;
   onOpenStudentModal: (studentId: string) => void;
   onAddConductRecord?: (record: Omit<ConductRecord, 'id'>) => void;
+  onUpdateConductRecord?: (record: ConductRecord) => void;
   onDeleteConductRecord?: (recordId: string) => void;
   onShowToast: (msg: string, type?: 'success' | 'error' | 'info') => void;
   onOpenExcelImport: () => void;
@@ -80,6 +87,7 @@ export const StudentsView: React.FC<StudentsViewProps> = ({
   onCloseStudentModal,
   onOpenStudentModal,
   onAddConductRecord = () => {},
+  onUpdateConductRecord,
   onDeleteConductRecord,
   onShowToast,
   onOpenExcelImport,
@@ -244,19 +252,23 @@ export const StudentsView: React.FC<StudentsViewProps> = ({
     ? (students.find((s) => s.id === activeStudentModalId) ?? null)
     : null;
 
-  // Tính thống kê thi đua và hạnh kiểm cho từng học sinh
+  const yearConfigs = getAcademicYearsConfig(activeSettings);
+  const activeTerm = getActiveTerm(activeSettings);
+  const effectiveThresholds = ratingThresholds || activeSettings.ratingThresholds;
+
+  // Tính thống kê thi đua và hạnh kiểm cho từng học sinh theo HỌC KỲ ĐANG DIỄN RA (nền 200đ/HK)
   const getStudentConductSummary = (studentId: string) => {
-    const sRecords = conduct.filter((c) => c.studentId === studentId);
-    const praises = sRecords
-      .filter((c) => c.type === 'praise')
-      .reduce((sum, c) => sum + Math.abs(c.points), 0);
-    const reminders = sRecords
-      .filter((c) => c.type === 'reminder')
-      .reduce((sum, c) => sum + Math.abs(c.points), 0);
-    const score = 100 + praises - reminders;
+    const res = computeStudentSemesterConduct(
+      studentId,
+      conduct,
+      activeTerm.academicYear,
+      activeTerm.semester,
+      yearConfigs,
+      effectiveThresholds
+    );
     return {
-      score,
-      rating: calculateConductRating(score),
+      score: res.totalScore,
+      rating: res.ratingInfo,
     };
   };
 
@@ -589,14 +601,14 @@ export const StudentsView: React.FC<StudentsViewProps> = ({
 
                       {/* Hạnh kiểm và Điểm thi đua */}
                       <td className="py-3.5 px-4">
-                        <div className="flex items-center space-x-1.5">
+                        <div className="flex items-center space-x-1.5" title={`Điểm ${getSemesterLabel(activeTerm.semester)} (${activeTerm.academicYear})`}>
                           <span
                             className={`px-2 py-0.5 rounded text-[11px] font-bold border ${condSummary.rating.badgeBg} ${condSummary.rating.badgeText}`}
                           >
                             {condSummary.rating.rating}
                           </span>
                           <span className="text-xs font-semibold text-slate-700 font-mono">
-                            {condSummary.score}đ
+                            {condSummary.score}/200đ
                           </span>
                         </div>
                       </td>
@@ -689,7 +701,7 @@ export const StudentsView: React.FC<StudentsViewProps> = ({
         onShowToast={onShowToast}
       />
 
-      {/* MODAL 1: HỒ SƠ HỌC SINH CHI TIẾT (ĐẦY ĐỦ THI ĐUA, THÁNG & HẠNH KIỂM) */}
+      {/* MODAL 1: HỒ SƠ HỌC SINH CHI TIẾT (ĐẦY ĐỦ THI ĐUA, HỌC KỲ & HẠNH KIỂM) */}
       <StudentProfileModal
         isOpen={!!activeStudent}
         student={activeStudent}
@@ -697,12 +709,14 @@ export const StudentsView: React.FC<StudentsViewProps> = ({
         conduct={conduct}
         criteria={criteria}
         currentUser={currentUser}
-        ratingThresholds={ratingThresholds}
+        ratingThresholds={effectiveThresholds}
+        settings={activeSettings}
         isTeacherRole={isTeacherLoggedIn}
         onClose={onCloseStudentModal}
         onOpenOwnProfile={() => currentUser?.studentId && onOpenStudentModal(currentUser.studentId)}
         onEditStudent={(s) => openEditModal(s)}
         onAddConductRecord={onAddConductRecord}
+        onUpdateConductRecord={onUpdateConductRecord}
         onDeleteConductRecord={onDeleteConductRecord}
         onShowToast={onShowToast}
       />
